@@ -23,6 +23,7 @@ stats = {
 
 def send_request(client_id):
     """Send one HTTP request through the proxy."""
+
     start = perf_counter()
 
     try:
@@ -43,13 +44,18 @@ def send_request(client_id):
             else:
                 stats["failed"] += 1
 
-    except requests.RequestException:
+    except requests.RequestException as error:
         elapsed = (perf_counter() - start) * 1000
 
         with stats_lock:
             stats["total"] += 1
             stats["failed"] += 1
             stats["total_response_time_ms"] += elapsed
+
+        print(
+            f"[REQUEST ERROR] Client: {client_id} | "
+            f"{type(error).__name__}: {error}"
+        )
 
 
 def get_rate(mode, elapsed, normal_rate, high_rate, burst_rate):
@@ -69,18 +75,37 @@ def get_rate(mode, elapsed, normal_rate, high_rate, burst_rate):
     return normal_rate
 
 
-def run_generator(mode, duration, normal_rate, high_rate,
-                  burst_rate, workers, client_id):
+def run_generator(
+    mode,
+    duration,
+    normal_rate,
+    high_rate,
+    burst_rate,
+    workers,
+    client_id,
+    clients,
+):
+    """Generate HTTP traffic from multiple simulated clients."""
+
+    if clients == 1:
+        client_ids = [client_id]
+    else:
+        client_ids = [
+            f"{client_id}-{i:02d}"
+            for i in range(1, clients + 1)
+        ]
 
     print("\nStarting traffic generator...")
     print(f"Mode: {mode}")
     print(f"Duration: {duration} seconds")
     print(f"Proxy: {PROXY_URL}")
-    print(f"Test client ID: {client_id}")
+    print(f"Number of simulated clients: {clients}")
+    print("Simulated clients:", ", ".join(client_ids))
     print("-----------------------------------")
 
     start_time = perf_counter()
     next_request_time = start_time
+    request_count = 0
 
     with ThreadPoolExecutor(max_workers=workers) as executor:
 
@@ -101,10 +126,22 @@ def run_generator(mode, duration, normal_rate, high_rate,
             interval = 1.0 / current_rate
 
             if perf_counter() >= next_request_time:
-                executor.submit(send_request, client_id)
+
+                # Distribute requests round-robin
+                # across the simulated clients.
+                selected_client = client_ids[
+                    request_count % len(client_ids)
+                ]
+
+                executor.submit(send_request, selected_client)
+
+                request_count += 1
                 next_request_time += interval
+
             else:
-                time.sleep(min(0.01, next_request_time - perf_counter()))
+                time.sleep(
+                    max(0.0, min(0.01, next_request_time - perf_counter()))
+                )
 
     total_time = perf_counter() - start_time
 
@@ -120,6 +157,7 @@ def run_generator(mode, duration, normal_rate, high_rate,
 
     print("\n========== TRAFFIC REPORT ==========")
     print(f"Scenario: {mode}")
+    print(f"Simulated clients: {clients}")
     print(f"Duration: {total_time:.2f} seconds")
     print(f"Total requests: {total}")
     print(f"Successful requests: {successful}")
@@ -127,7 +165,10 @@ def run_generator(mode, duration, normal_rate, high_rate,
     print(f"Average response time: {average:.2f} ms")
 
     if total_time > 0:
-        print(f"Actual request rate: {total / total_time:.2f} requests/sec")
+        print(
+            f"Actual request rate: "
+            f"{total / total_time:.2f} requests/sec"
+        )
 
     print("====================================")
 
@@ -135,7 +176,7 @@ def run_generator(mode, duration, normal_rate, high_rate,
 if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(
-        description="ProxyTrap controlled traffic generator"
+        description="ProxyTrap controlled HTTP traffic generator"
     )
 
     parser.add_argument(
@@ -150,6 +191,7 @@ if __name__ == "__main__":
     parser.add_argument("--burst-rate", type=float, default=20)
     parser.add_argument("--workers", type=int, default=10)
     parser.add_argument("--client-id", default="legitimate-client")
+    parser.add_argument("--clients", type=int, default=1)
 
     args = parser.parse_args()
 
@@ -159,8 +201,11 @@ if __name__ == "__main__":
         or args.high_rate <= 0
         or args.burst_rate <= 0
         or args.workers <= 0
+        or args.clients <= 0
     ):
-        parser.error("Duration, rates and workers must be positive.")
+        parser.error(
+            "Duration, rates, workers and clients must be positive."
+        )
 
     run_generator(
         args.mode,
@@ -170,4 +215,5 @@ if __name__ == "__main__":
         args.burst_rate,
         args.workers,
         args.client_id,
+        args.clients,
     )
